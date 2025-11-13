@@ -1,51 +1,160 @@
-# Wood OCR Project
+# 🎨 Wood Paint Quality Checker - Hệ Thống Kiểm Tra Chất Lượng Sơn Gỗ
 
-## Overview
-This project is a web application for wood color quality checking using OCR technology. It consists of a backend built with Flask and a frontend built with React.
+Hệ thống kiểm tra chất lượng sơn gỗ sử dụng phân tích màu sắc với Delta E 2000 và đồng bộ real-time giữa máy tính và điện thoại.
 
-## Getting Started
+---
 
-### Prerequisites
-- Python 3.x
-- Node.js and npm
+## 🚀 Hướng Dẫn Cài Đặt và Chạy
 
-### Backend Setup
-1. Navigate to the `backend` directory.
-2. Create a virtual environment (optional but recommended):
-   ```
-   python -m venv venv
-   ```
-3. Activate the virtual environment:
-   - On Windows:
-     ```
-     venv\Scripts\activate
-     ```
-   - On macOS/Linux:
-     ```
-     source venv/bin/activate
-     ```
-4. Install the required packages:
-   ```
-   pip install -r requirements.txt
-   ```
-5. Run the backend application:
-   ```
-   python app.py
-   ```
+### Bước 1: Cài Đặt Backend (Python/Flask)
 
-### Frontend Setup
-1. Navigate to the `frontend` directory.
-2. Install the required packages:
-   ```
-   npm install
-   ```
-3. Start the frontend application:
-   ```
-   npm start
-   ```
+```bash
+# Di chuyển vào thư mục backend
+cd backend
 
-### Deployment
-Refer to `DEPLOYMENT.md` for deployment instructions.
+#Tạo môi trường ảo
+python -m venv .venv
 
-## License
-This project is licensed under the MIT License.
+# Cài đặt các thư viện cần thiết
+pip install -r requirements.txt
+```
+
+### Bước 2: Cài Đặt Frontend (React)
+
+```bash
+# Di chuyển vào thư mục frontend
+cd frontend
+
+# Cài đặt các dependencies
+npm install socket.io-client@4.8.1 qrcode --legacy-peer-deps
+
+# ⚠️ NẾU GẶP LỖI "react-scripts: command not found":
+# Chạy lệnh sau để sửa lỗi:
+npm audit fix --force
+# Hoặc cài đặt lại react-scripts:
+npm install react-scripts --save --legacy-peer-deps
+```
+
+**Lưu ý về lỗi cài đặt Frontend:**
+- Nếu `npm install` báo lỗi về peer dependencies, sử dụng flag `--legacy-peer-deps`
+- Nếu sau khi cài xong mà chạy `npm start` báo lỗi `react-scripts: command not found`, hãy chạy:
+  ```bash
+  npm audit fix --force
+  ```
+  hoặc
+  ```bash
+  npm install react-scripts --save --legacy-peer-deps
+  ```
+
+### Bước 3: Khởi Chạy Hệ Thống
+
+#### Terminal 1 - Khởi động Backend Server
+
+```bash
+cd backend
+
+#Để kích hoạt venv trên Windows
+.\.venv\Scripts\activate
+
+#Note: Với MacOS hoặc Linux bạn dùng lệnh
+source .venv/bin/activate
+
+python app.py
+```
+
+**Kiểm tra output thành công:**
+```
+🚀 ═══════════════════════════════════════════════════════════
+🌟   Wood Paint Quality Checker - Backend Server
+🌟   Powered by Flask + SocketIO + Delta E 2000 Analysis
+═══════════════════════════════════════════════════════════
+📡 Backend API:     http://0.0.0.0:5001/api
+🔌 WebSocket:       ws://0.0.0.0:5001
+🌐 Network Access:  http://192.168.x.x:5001
+═══════════════════════════════════════════════════════════
+```
+
+**⚠️ QUAN TRỌNG:** Ghi nhớ địa chỉ IP hiển thị ở dòng "Network Access" (ví dụ: `192.168.x.x`)
+
+#### Terminal 2 - Khởi động Frontend
+
+```bash
+cd frontend
+npm start
+```
+
+**Kiểm tra output thành công:**
+```
+Compiled successfully!
+
+Local:            http://localhost:3000
+On Your Network:  http://192.168.x.x:3000
+```
+
+**⚠️ QUAN TRỌNG:** Ghi nhớ địa chỉ IP hiển thị ở dòng "On Your Network"
+
+---
+
+## 🎮 Hướng Dẫn Sử Dụng
+
+### Chế Độ 1: Đồng Bộ Laptop - Phone (Real-Time Sync)
+
+#### Trên Laptop:
+1. Mở `http://192.168.x.x:3000` (hoặc localhost:3000)
+2. Click nút **💻 Laptop Mode**
+3. Màn hình sẽ hiển thị mã session (ví dụ: `AB12CD34`)
+4. Giữ màn hình laptop mở
+
+#### Trên Điện Thoại:
+1. Mở `http://192.168.x.x:3000`
+2. Click nút **📱 Phone Mode**
+3. Nhập mã session `AB12CD34` → Click **Kết Nối**
+4. Upload/chụp ảnh mẫu gốc
+5. Upload/chụp ảnh sản phẩm cần kiểm tra
+6. Click **Phân Tích Chất Lượng**
+7. ✨ Kết quả sẽ tự động hiển thị trên laptop real-time!
+
+### Chế Độ 2: Standalone (Sử Dụng Độc Lập)
+
+1. Mở ứng dụng trên bất kỳ thiết bị nào
+2. Click **Bỏ Qua** ở màn hình chọn chế độ
+3. Upload/chụp ảnh và xem kết quả ngay trên thiết bị đó
+
+---
+
+## 🔧 Khắc Phục Sự Cố
+
+### Lỗi 1: "react-scripts: command not found" khi chạy npm start
+
+**Nguyên nhân:** Package `react-scripts` có version không hợp lệ (`^0.0.0`) trong `package.json`.
+
+**Giải pháp: ⭐ Đã Fix Tự Động**
+
+Vấn đề này đã được sửa trong `package.json`. Nếu vẫn gặp lỗi, chạy:
+
+```bash
+cd frontend
+
+# Xóa và cài lại toàn bộ dependencies
+rm -rf node_modules package-lock.json
+npm install --legacy-peer-deps
+
+# Nếu gặp lỗi "Cannot find module 'ajv/dist/compile/codegen'"
+npm install ajv@^8.0.0 --legacy-peer-deps
+
+# Chạy lại
+npm start
+```
+
+```
+
+### Lỗi 2: Lỗi peer dependencies khi npm install
+
+**Giải pháp:** Luôn sử dụng flag `--legacy-peer-deps`:
+
+```bash
+npm install --legacy-peer-deps
+```
+```
+
+

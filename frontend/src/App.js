@@ -5,7 +5,6 @@ import {
   Typography,
   Grid,
   Button,
-  Card,
   CircularProgress,
   Chip,
   Table,
@@ -25,7 +24,10 @@ import {
   FormControl,
   InputLabel,
   Tabs,
-  Tab
+  Tab,
+  Paper,
+  Alert,
+  AlertTitle
 } from '@mui/material';
 import {
   CloudUpload,
@@ -36,13 +38,36 @@ import {
   CheckCircle,
   Warning,
   Cancel,
-  Assessment
+  Assessment,
+  Smartphone,
+  Laptop
 } from '@mui/icons-material';
 import { BarChart, Bar, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import axios from 'axios';
+import { io } from 'socket.io-client';
+import QRCode from 'qrcode';
 import './App.css';
 
-const API_BASE_URL = 'http://localhost:5002/api';
+// Tự động detect API URL
+// Nếu truy cập từ localhost → dùng localhost
+// Nếu truy cập từ IP (điện thoại) → dùng IP đó
+const getApiBaseUrl = () => {
+  const hostname = window.location.hostname;
+  
+  // Nếu đang ở localhost/127.0.0.1, dùng localhost
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return 'http://localhost:5001/api';
+  }
+  
+  // Nếu đang ở IP (ví dụ: 192.168.1.5), dùng IP đó
+  return `http://${hostname}:5001/api`;
+};
+
+const API_BASE_URL = getApiBaseUrl();
+const SOCKET_URL = API_BASE_URL.replace('/api', '');
+
+console.log('🌐 API Base URL:', API_BASE_URL);
+console.log('🔌 Socket URL:', SOCKET_URL);
 
 const CATEGORIES = [
   'Gỗ sồi',
@@ -66,8 +91,17 @@ function App() {
   const [testImages, setTestImages] = useState([]);
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('');
   const [thresholdExcellent, setThresholdExcellent] = useState(1.5);
   const [thresholdAcceptable, setThresholdAcceptable] = useState(2.5);
+  
+  // Socket.IO states
+  const [socket, setSocket] = useState(null);
+  const [displayMode, setDisplayMode] = useState(null); // null, 'phone', 'laptop'
+  const [sessionId, setSessionId] = useState(null);
+  const [phoneConnected, setPhoneConnected] = useState(false);
+  const [sessionInput, setSessionInput] = useState('');
+  const [qrCodeUrl, setQrCodeUrl] = useState('');
   
   // Dialog states
   const [openAddSample, setOpenAddSample] = useState(false);
@@ -84,6 +118,93 @@ function App() {
     loadSamples();
   }, []);
 
+  // Initialize Socket.IO
+  useEffect(() => {
+    const newSocket = io(SOCKET_URL, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: 5
+    });
+
+    newSocket.on('connect', () => {
+      console.log('🔌 Connected to server:', newSocket.id);
+    });
+
+    newSocket.on('disconnect', () => {
+      console.log('🔌 Disconnected from server');
+    });
+
+    newSocket.on('session_created', (data) => {
+      console.log('📱 Session created:', data.session_id);
+      setSessionId(data.session_id);
+      // Generate QR code
+      QRCode.toDataURL(`${window.location.origin}?session=${data.session_id}`, {
+        width: 200,
+        margin: 2,
+        color: { dark: '#000000', light: '#ffffff' }
+      }).then(url => setQrCodeUrl(url));
+    });
+
+    newSocket.on('session_joined', (data) => {
+      if (data.status === 'success') {
+        console.log('📱 Joined session successfully');
+        setSessionId(data.session_id);
+      } else {
+        alert(data.message || 'Không thể kết nối session');
+        setSessionInput('');
+      }
+    });
+
+    newSocket.on('phone_connected', (data) => {
+      console.log('📱 Phone connected:', data);
+      setPhoneConnected(true);
+    });
+
+    newSocket.on('analysis_started', (data) => {
+      console.log('📊 Analysis started:', data.message);
+      setLoading(true);
+      setLoadingMessage(data.message);
+    });
+
+    newSocket.on('analysis_progress', (data) => {
+      console.log('📊 Progress:', data);
+      setLoadingMessage(`${data.message} (${data.current}/${data.total})`);
+    });
+
+    newSocket.on('new_result', (data) => {
+      console.log('📊 Received result:', data);
+      setResults(data);
+      
+      // Lưu hình ảnh nếu có (từ phone)
+      if (data.reference_image) {
+        setReferenceImage(`data:image/jpeg;base64,${data.reference_image}`);
+      }
+      if (data.test_images && data.test_images.length > 0) {
+        setTestImages(data.test_images.map(img => ({
+          filename: img.filename,
+          image: `data:image/jpeg;base64,${img.image}`
+        })));
+      }
+      
+      setLoading(false);
+      setLoadingMessage('');
+    });
+
+    newSocket.on('analysis_error', (data) => {
+      console.error('❌ Analysis error:', data);
+      alert(data.error);
+      setLoading(false);
+      setLoadingMessage('');
+    });
+
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.close();
+    };
+  }, []);
+
   const loadSamples = async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/library/samples`);
@@ -93,36 +214,118 @@ function App() {
     }
   };
 
-  const handleReferenceUpload = (event) => {
-    const file = event.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setReferenceImage(e.target.result);
-        setSelectedSample(null);
-      };
-      reader.readAsDataURL(file);
+  // Session handlers
+  const handleCreateSession = () => {
+    if (socket) {
+      socket.emit('create_session', {});
+      setDisplayMode('laptop');
+      setResults(null);
     }
   };
 
-  const handleTestUpload = (event) => {
-    const files = Array.from(event.target.files);
-    const imagePromises = files.map(file => {
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          resolve({
-            filename: file.name,
-            image: e.target.result
-          });
-        };
-        reader.readAsDataURL(file);
-      });
-    });
+  const handleJoinSession = () => {
+    if (socket && sessionInput) {
+      socket.emit('join_session', { session_id: sessionInput.toUpperCase() });
+      setDisplayMode('phone');
+    }
+  };
 
-    Promise.all(imagePromises).then(images => {
-      setTestImages(images);
+  const handleSkipSession = () => {
+    setDisplayMode('phone');
+    setSessionId(null);
+  };
+
+  // Hàm resize ảnh để giảm kích thước
+  const resizeImage = (file, maxWidth = 800, maxHeight = 800) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+
+          // Tính toán kích thước mới giữ tỷ lệ
+          if (width > height) {
+            if (width > maxWidth) {
+              height = Math.round((height * maxWidth) / width);
+              width = maxWidth;
+            }
+          } else {
+            if (height > maxHeight) {
+              width = Math.round((width * maxHeight) / height);
+              height = maxHeight;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+
+          // Chuyển về base64 với chất lượng 0.85
+          resolve(canvas.toDataURL('image/jpeg', 0.85));
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
     });
+  };
+
+  const handleReferenceUpload = async (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      try {
+        // Hiển thị loading
+        setLoading(true);
+        setLoadingMessage('Đang xử lý ảnh mẫu gốc...');
+        const resizedImage = await resizeImage(file, 1200, 1200);
+        setReferenceImage(resizedImage);
+        setSelectedSample(null);
+        setLoadingMessage('');
+      } catch (error) {
+        console.error('Error processing image:', error);
+        alert('Lỗi khi xử lý ảnh. Vui lòng thử lại!');
+        setLoadingMessage('');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  const handleTestUpload = async (event) => {
+    const files = Array.from(event.target.files);
+    
+    if (files.length === 0) return;
+
+    try {
+      // Hiển thị loading
+      setLoading(true);
+      setLoadingMessage(`Đang xử lý ${files.length} ảnh sản phẩm...`);
+      
+      const imagePromises = files.map(async (file, index) => {
+        setLoadingMessage(`Đang xử lý ảnh ${index + 1}/${files.length}...`);
+        const resizedImage = await resizeImage(file, 1200, 1200);
+        return {
+          filename: file.name,
+          image: resizedImage
+        };
+      });
+
+      const images = await Promise.all(imagePromises);
+      setTestImages(images);
+      
+      // Hiển thị thông báo thành công
+      console.log(`✅ Đã xử lý ${images.length} ảnh thành công`);
+      setLoadingMessage('');
+    } catch (error) {
+      console.error('Error processing images:', error);
+      alert('Lỗi khi xử lý ảnh. Vui lòng thử lại!');
+      setLoadingMessage('');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSelectSample = (sample) => {
@@ -137,11 +340,14 @@ function App() {
     }
 
     setLoading(true);
+    setLoadingMessage('Đang phân tích màu sắc...');
+    
     try {
       const requestData = {
         threshold_excellent: thresholdExcellent,
         threshold_acceptable: thresholdAcceptable,
-        test_images: testImages
+        test_images: testImages,
+        session_id: sessionId || undefined
       };
 
       if (selectedSample) {
@@ -150,13 +356,51 @@ function App() {
         requestData.reference_image = referenceImage;
       }
 
-      const response = await axios.post(`${API_BASE_URL}/analyze`, requestData);
-      setResults(response.data);
+      console.log('📤 Đang gửi request phân tích...');
+      console.log(`   - Số lượng ảnh test: ${testImages.length}`);
+      console.log(`   - Ngưỡng tuyệt vời: ${thresholdExcellent}`);
+      console.log(`   - Ngưỡng chấp nhận: ${thresholdAcceptable}`);
+
+      const response = await axios.post(`${API_BASE_URL}/analyze`, requestData, {
+        timeout: 120000, // 2 phút timeout
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      
+      console.log('✅ Phân tích thành công!');
+      
+      // Nếu không có session (standalone), set results local
+      if (!sessionId) {
+        setResults(response.data);
+      }
+      // Nếu có session, kết quả đã được broadcast qua socket
+      
+      setLoadingMessage('');
     } catch (error) {
-      console.error('Error analyzing:', error);
-      alert('Có lỗi xảy ra khi phân tích!');
+      console.error('❌ Error analyzing:', error);
+      
+      let errorMessage = 'Có lỗi xảy ra khi phân tích!';
+      
+      if (error.code === 'ECONNABORTED') {
+        errorMessage = 'Timeout! Quá trình phân tích mất quá nhiều thời gian. Hãy thử giảm số lượng ảnh hoặc kích thước ảnh.';
+      } else if (error.response) {
+        // Server responded with error
+        errorMessage = `Lỗi từ server: ${error.response.data?.error || error.response.statusText}`;
+        console.error('Server error details:', error.response.data);
+      } else if (error.request) {
+        // Request made but no response
+        errorMessage = 'Không thể kết nối đến server. Vui lòng kiểm tra:\n' +
+                      '1. Backend có đang chạy không? (http://localhost:5001)\n' +
+                      '2. Kiểm tra kết nối mạng';
+      }
+      
+      alert(errorMessage);
+      setLoadingMessage('');
     } finally {
-      setLoading(false);
+      if (!sessionId) {
+        setLoading(false);
+      }
     }
   };
 
@@ -393,21 +637,42 @@ function App() {
             </Typography>
             
             <Box sx={{ mb: 2 }}>
-              <Button
-                variant="outlined"
-                component="label"
-                startIcon={<CloudUpload />}
-                fullWidth
-                sx={{ mb: 1 }}
-              >
-                Upload Ảnh Mới
-                <input
-                  type="file"
-                  hidden
-                  accept="image/*"
-                  onChange={handleReferenceUpload}
-                />
-              </Button>
+              <Grid container spacing={1} sx={{ mb: 1 }}>
+                <Grid item xs={6}>
+                  <Button
+                    variant="outlined"
+                    component="label"
+                    startIcon={<CloudUpload />}
+                    fullWidth
+                  >
+                    Upload Ảnh
+                    <input
+                      type="file"
+                      hidden
+                      accept="image/*"
+                      onChange={handleReferenceUpload}
+                    />
+                  </Button>
+                </Grid>
+                <Grid item xs={6}>
+                  <Button
+                    variant="contained"
+                    component="label"
+                    startIcon={<PhotoLibrary />}
+                    fullWidth
+                    color="primary"
+                  >
+                    📸 Chụp Ảnh
+                    <input
+                      type="file"
+                      hidden
+                      accept="image/*"
+                      capture="environment"
+                      onChange={handleReferenceUpload}
+                    />
+                  </Button>
+                </Grid>
+              </Grid>
               
               <FormControl fullWidth>
                 <InputLabel>Hoặc chọn từ thư viện</InputLabel>
@@ -453,22 +718,44 @@ function App() {
               📷 2. Ảnh Sản Phẩm Kiểm Tra
             </Typography>
             
-            <Button
-              variant="outlined"
-              component="label"
-              startIcon={<PhotoLibrary />}
-              fullWidth
-              sx={{ mb: 2 }}
-            >
-              Chọn Nhiều Ảnh
-              <input
-                type="file"
-                hidden
-                multiple
-                accept="image/*"
-                onChange={handleTestUpload}
-              />
-            </Button>
+            <Grid container spacing={1} sx={{ mb: 2 }}>
+              <Grid item xs={6}>
+                <Button
+                  variant="outlined"
+                  component="label"
+                  startIcon={<PhotoLibrary />}
+                  fullWidth
+                >
+                  Chọn Ảnh
+                  <input
+                    type="file"
+                    hidden
+                    multiple
+                    accept="image/*"
+                    onChange={handleTestUpload}
+                  />
+                </Button>
+              </Grid>
+              <Grid item xs={6}>
+                <Button
+                  variant="contained"
+                  component="label"
+                  startIcon={<PhotoLibrary />}
+                  fullWidth
+                  color="success"
+                >
+                  📸 Chụp Ảnh
+                  <input
+                    type="file"
+                    hidden
+                    multiple
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleTestUpload}
+                  />
+                </Button>
+              </Grid>
+            </Grid>
 
             {testImages.length > 0 && (
               <Box>
@@ -516,8 +803,13 @@ function App() {
             }
           }}
         >
-          {loading ? 'Đang phân tích...' : 'Phân Tích Chất Lượng'}
+          {loading ? (loadingMessage || 'Đang xử lý...') : 'Phân Tích Chất Lượng'}
         </Button>
+        {loading && loadingMessage && (
+          <Typography variant="body2" sx={{ mt: 2, color: '#1976d2', fontWeight: 500 }}>
+            {loadingMessage}
+          </Typography>
+        )}
       </Box>
 
       {/* Results */}
@@ -791,19 +1083,402 @@ function App() {
     </Box>
   );
 
+  // Render mode selection
+  if (!displayMode) {
+    return (
+      <Container maxWidth="sm" sx={{ mt: 8 }}>
+        <Paper elevation={3} sx={{ p: 4, textAlign: 'center' }}>
+          <Typography variant="h4" gutterBottom sx={{ fontWeight: 700, mb: 3 }}>
+            🎨 Wood Color Quality Checker
+          </Typography>
+          <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
+            Chọn chế độ sử dụng:
+          </Typography>
+          
+          <Grid container spacing={3}>
+            <Grid item xs={12}>
+              <Button
+                variant="contained"
+                size="large"
+                fullWidth
+                startIcon={<Smartphone />}
+                onClick={handleSkipSession}
+                sx={{ 
+                  py: 3,
+                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  fontSize: '1.1rem'
+                }}
+              >
+                📱 Điện Thoại
+                <Typography variant="caption" display="block" sx={{ fontSize: '0.8rem', mt: 0.5 }}>
+                  Chụp ảnh và phân tích
+                </Typography>
+              </Button>
+            </Grid>
+            
+            <Grid item xs={12}>
+              <Button
+                variant="contained"
+                size="large"
+                fullWidth
+                startIcon={<Laptop />}
+                onClick={handleCreateSession}
+                sx={{ 
+                  py: 3,
+                  background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+                  fontSize: '1.1rem'
+                }}
+              >
+                💻 Laptop
+                <Typography variant="caption" display="block" sx={{ fontSize: '0.8rem', mt: 0.5 }}>
+                  Hiển thị kết quả cho khách hàng
+                </Typography>
+              </Button>
+            </Grid>
+          </Grid>
+        </Paper>
+      </Container>
+    );
+  }
+
+  // Render laptop display mode
+  if (displayMode === 'laptop') {
+    return (
+      <Box className="App">
+        <Box className="dashboard-header">
+          <Container maxWidth="xl">
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Box>
+                <Typography className="dashboard-welcome">
+                  💻 Màn Hình Hiển Thị (Laptop)
+                </Typography>
+                <Typography className="dashboard-subtitle">
+                  Kết quả sẽ hiển thị real-time từ điện thoại
+                </Typography>
+              </Box>
+              <Button
+                variant="outlined"
+                color="inherit"
+                onClick={() => {
+                  setDisplayMode(null);
+                  setSessionId(null);
+                  setPhoneConnected(false);
+                  setResults(null);
+                }}
+              >
+                Đổi Chế Độ
+              </Button>
+            </Box>
+          </Container>
+        </Box>
+
+        <Container maxWidth="xl" sx={{ mt: 3 }}>
+          {sessionId && (
+            <Alert 
+              severity={phoneConnected ? "success" : "warning"} 
+              sx={{ mb: 3, p: 3 }}
+            >
+              <AlertTitle sx={{ fontSize: '1.2rem', fontWeight: 700 }}>
+                {phoneConnected ? '✅ Điện Thoại Đã Kết Nối!' : '⏳ Đang Chờ Điện Thoại Kết Nối'}
+              </AlertTitle>
+              
+              <Box sx={{ my: 2 }}>
+                <Typography variant="body2" gutterBottom>
+                  Nhập mã này trên điện thoại:
+                </Typography>
+                <Box sx={{ 
+                  bgcolor: 'background.paper', 
+                  p: 2, 
+                  borderRadius: 2, 
+                  display: 'inline-block',
+                  border: '2px solid',
+                  borderColor: phoneConnected ? 'success.main' : 'warning.main'
+                }}>
+                  <Typography 
+                    variant="h3" 
+                    sx={{ 
+                      fontFamily: 'monospace', 
+                      letterSpacing: '0.1em',
+                      fontWeight: 700,
+                      color: phoneConnected ? 'success.main' : 'warning.main'
+                    }}
+                  >
+                    {sessionId}
+                  </Typography>
+                </Box>
+              </Box>
+
+              {qrCodeUrl && (
+                <Box sx={{ mt: 2, textAlign: 'center' }}>
+                  <Typography variant="body2" gutterBottom>
+                    Hoặc quét QR Code:
+                  </Typography>
+                  <Box sx={{ display: 'inline-block', bgcolor: 'white', p: 2, borderRadius: 2 }}>
+                    <img src={qrCodeUrl} alt="QR Code" style={{ width: 150, height: 150 }} />
+                  </Box>
+                </Box>
+              )}
+            </Alert>
+          )}
+
+          {loading && (
+            <Box sx={{ textAlign: 'center', my: 8 }}>
+              <CircularProgress size={80} thickness={4} />
+              <Typography variant="h5" sx={{ mt: 3, color: '#1976d2', fontWeight: 600 }}>
+                {loadingMessage || 'Đang chờ kết quả từ điện thoại...'}
+              </Typography>
+            </Box>
+          )}
+
+          {results && !loading && (
+            <Box className="fade-in">
+              <Typography variant="h4" gutterBottom sx={{ fontWeight: 700, mb: 4, color: '#1976d2' }}>
+                📊 Kết Quả Phân Tích Từ Điện Thoại
+              </Typography>
+
+              {/* Comparison Images Section */}
+              {referenceImage && testImages.length > 0 && (
+                <Box sx={{ mb: 4 }}>
+                  <Typography variant="h5" gutterBottom sx={{ fontWeight: 600, mb: 3, color: '#2c3e50' }}>
+                    🖼️ So Sánh Hình Ảnh
+                  </Typography>
+                  <Grid container spacing={3}>
+                    <Grid item xs={12} md={4}>
+                      <Box sx={{ textAlign: 'center' }}>
+                        <Typography variant="h6" sx={{ mb: 2, fontWeight: 600, color: '#1976d2' }}>
+                          📷 Ảnh Mẫu Gốc
+                        </Typography>
+                        <Box sx={{ 
+                          p: 2, 
+                          bgcolor: '#f8f9fa', 
+                          borderRadius: '12px',
+                          border: '3px solid #1976d2',
+                          boxShadow: '0 4px 12px rgba(25,118,210,0.2)'
+                        }}>
+                          <img
+                            src={referenceImage}
+                            alt="Reference"
+                            style={{ 
+                              width: '100%', 
+                              maxHeight: '300px',
+                              objectFit: 'contain',
+                              borderRadius: '8px'
+                            }}
+                          />
+                        </Box>
+                        <Chip 
+                          label="Chuẩn So Sánh" 
+                          color="primary" 
+                          sx={{ mt: 2, fontWeight: 700, fontSize: '0.9rem', py: 2.5 }}
+                        />
+                      </Box>
+                    </Grid>
+                    
+                    <Grid item xs={12} md={4}>
+                      <Box sx={{ textAlign: 'center' }}>
+                        <Typography variant="h6" sx={{ mb: 2, fontWeight: 600, color: '#2e7d32' }}>
+                          ✅ Ảnh Tốt Nhất
+                        </Typography>
+                        <Box sx={{ 
+                          p: 2, 
+                          bgcolor: '#e8f5e9', 
+                          borderRadius: '12px',
+                          border: '3px solid #2e7d32',
+                          boxShadow: '0 4px 12px rgba(46,125,50,0.2)'
+                        }}>
+                          {(() => {
+                            const best = results.results.reduce((min, r) => r.delta_e < min.delta_e ? r : min);
+                            const bestImage = testImages.find(img => img.filename === best.filename);
+                            return (
+                              <>
+                                {bestImage && (
+                                  <img
+                                    src={bestImage.image}
+                                    alt="Best"
+                                    style={{ 
+                                      width: '100%', 
+                                      maxHeight: '300px',
+                                      objectFit: 'contain',
+                                      borderRadius: '8px'
+                                    }}
+                                  />
+                                )}
+                                <Typography variant="body2" sx={{ mt: 2, fontWeight: 600, fontSize: '0.85rem' }}>
+                                  {best.filename}
+                                </Typography>
+                                <Box sx={{ mt: 1 }}>
+                                  <Chip 
+                                    label={`ΔE: ${best.delta_e.toFixed(2)}`}
+                                    size="small"
+                                    sx={{ 
+                                      bgcolor: '#2e7d32', 
+                                      color: 'white',
+                                      fontWeight: 700,
+                                      fontSize: '0.85rem',
+                                      px: 1.5,
+                                      py: 2
+                                    }}
+                                  />
+                                  <Chip 
+                                    label={best.status}
+                                    size="small"
+                                    sx={{ 
+                                      ml: 1,
+                                      bgcolor: best.color_code, 
+                                      color: 'white',
+                                      fontWeight: 700,
+                                      fontSize: '0.85rem',
+                                      px: 1.5,
+                                      py: 2
+                                    }}
+                                  />
+                                </Box>
+                              </>
+                            );
+                          })()}
+                        </Box>
+                      </Box>
+                    </Grid>
+                    
+                    <Grid item xs={12} md={4}>
+                      <Box sx={{ textAlign: 'center' }}>
+                        <Typography variant="h6" sx={{ mb: 2, fontWeight: 600, color: '#d32f2f' }}>
+                          ❌ Ảnh Kém Nhất
+                        </Typography>
+                        <Box sx={{ 
+                          p: 2, 
+                          bgcolor: '#ffebee', 
+                          borderRadius: '12px',
+                          border: '3px solid #d32f2f',
+                          boxShadow: '0 4px 12px rgba(211,47,47,0.2)'
+                        }}>
+                          {(() => {
+                            const worst = results.results.reduce((max, r) => r.delta_e > max.delta_e ? r : max);
+                            const worstImage = testImages.find(img => img.filename === worst.filename);
+                            return (
+                              <>
+                                {worstImage && (
+                                  <img
+                                    src={worstImage.image}
+                                    alt="Worst"
+                                    style={{ 
+                                      width: '100%', 
+                                      maxHeight: '300px',
+                                      objectFit: 'contain',
+                                      borderRadius: '8px'
+                                    }}
+                                  />
+                                )}
+                                <Typography variant="body2" sx={{ mt: 2, fontWeight: 600, fontSize: '0.85rem' }}>
+                                  {worst.filename}
+                                </Typography>
+                                <Box sx={{ mt: 1 }}>
+                                  <Chip 
+                                    label={`ΔE: ${worst.delta_e.toFixed(2)}`}
+                                    size="small"
+                                    sx={{ 
+                                      bgcolor: '#d32f2f', 
+                                      color: 'white',
+                                      fontWeight: 700,
+                                      fontSize: '0.85rem',
+                                      px: 1.5,
+                                      py: 2
+                                    }}
+                                  />
+                                  <Chip 
+                                    label={worst.status}
+                                    size="small"
+                                    sx={{ 
+                                      ml: 1,
+                                      bgcolor: worst.color_code, 
+                                      color: 'white',
+                                      fontWeight: 700,
+                                      fontSize: '0.85rem',
+                                      px: 1.5,
+                                      py: 2
+                                    }}
+                                  />
+                                </Box>
+                              </>
+                            );
+                          })()}
+                        </Box>
+                      </Box>
+                    </Grid>
+                  </Grid>
+                </Box>
+              )}
+
+              {/* Render existing results section */}
+              {renderInspectionTab()}
+            </Box>
+          )}
+
+          {!results && !loading && (
+            <Box sx={{ textAlign: 'center', my: 12 }}>
+              <Smartphone sx={{ fontSize: 100, color: '#ccc', mb: 2 }} />
+              <Typography variant="h5" color="text.secondary" gutterBottom>
+                Chờ điện thoại gửi kết quả...
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Nhập mã <strong>{sessionId}</strong> trên điện thoại để bắt đầu
+              </Typography>
+            </Box>
+          )}
+        </Container>
+      </Box>
+    );
+  }
+
   return (
     <Box className="App">
       {/* Dashboard Header */}
       <Box className="dashboard-header">
         <Container maxWidth="xl">
-          <Typography className="dashboard-welcome">
-            Chào mừng đến với Wood Color Quality Checker
-          </Typography>
-          <Typography className="dashboard-subtitle">
-            Hệ thống kiểm tra chất lượng màu sơn gỗ sử dụng Delta E 2000
-          </Typography>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Box>
+              <Typography className="dashboard-welcome">
+                {sessionId ? '📱 Điện Thoại (Đã Kết Nối)' : '📱 Điện Thoại (Độc Lập)'}
+              </Typography>
+              <Typography className="dashboard-subtitle">
+                {sessionId ? `Session: ${sessionId}` : 'Hệ thống kiểm tra chất lượng màu sơn gỗ sử dụng Delta E 2000'}
+              </Typography>
+            </Box>
+            <Button
+              variant="outlined"
+              color="inherit"
+              onClick={() => {
+                setDisplayMode(null);
+                setSessionId(null);
+                setSessionInput('');
+              }}
+            >
+              Đổi Chế Độ
+            </Button>
+          </Box>
         </Container>
       </Box>
+
+      {/* Session Join Alert */}
+      {!sessionId && displayMode === 'phone' && (
+        <Container maxWidth="xl" sx={{ mt: 3 }}>
+          <Alert severity="info" sx={{ mb: 3 }}>
+            <AlertTitle>Kết nối với Laptop (Tùy chọn)</AlertTitle>
+            <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
+              <TextField
+                size="small"
+                placeholder="Nhập mã 8 ký tự..."
+                value={sessionInput}
+                onChange={(e) => setSessionInput(e.target.value.toUpperCase())}
+                onKeyPress={(e) => e.key === 'Enter' && handleJoinSession()}
+              />
+              <Button variant="contained" onClick={handleJoinSession}>
+                Kết Nối
+              </Button>
+            </Box>
+          </Alert>
+        </Container>
+      )}
 
       {/* Tabs */}
       <Container maxWidth="xl" sx={{ mt: 0 }}>

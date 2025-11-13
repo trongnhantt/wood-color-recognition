@@ -4,6 +4,7 @@ Flask API Backend for Wood Paint Quality Inspection System
 
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import cv2
 import numpy as np
 from skimage import color, morphology
@@ -13,13 +14,79 @@ import json
 import os
 from datetime import datetime
 import base64
+import uuid
+import traceback
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Initialize SocketIO with proper async mode
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='threading',  # Sử dụng threading mode để tránh lỗi
+    ping_timeout=120, 
+    ping_interval=25,
+    logger=False,  # Tắt debug logs để giảm noise
+    engineio_logger=False
+)
 
 # Đường dẫn lưu trữ
 SAMPLE_LIBRARY_DIR = "sample_library"
 SAMPLE_METADATA_FILE = os.path.join(SAMPLE_LIBRARY_DIR, "metadata.json")
+
+# Dictionary để lưu sessions (laptop-phone sync)
+active_sessions = {}
+
+# ==================== SOCKETIO HANDLERS ====================
+
+@socketio.on('connect')
+def handle_connect():
+    """Client kết nối"""
+    print(f"🔌 Client connected: {request.sid}")
+    emit('connection_response', {'status': 'connected', 'sid': request.sid})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Client ngắt kết nối"""
+    print(f"🔌 Client disconnected: {request.sid}")
+
+@socketio.on('create_session')
+def handle_create_session(data):
+    """Laptop tạo session để nhận kết quả từ phone"""
+    session_id = str(uuid.uuid4())[:8].upper()
+    active_sessions[session_id] = {
+        'laptop_sid': request.sid,
+        'phone_sid': None,
+        'created_at': datetime.now().isoformat(),
+        'status': 'waiting'
+    }
+    join_room(session_id)
+    print(f"📱 Session created: {session_id} by {request.sid}")
+    emit('session_created', {'session_id': session_id})
+
+@socketio.on('join_session')
+def handle_join_session(data):
+    """Phone join vào session"""
+    session_id = data.get('session_id', '').upper()
+    if session_id in active_sessions:
+        active_sessions[session_id]['phone_sid'] = request.sid
+        active_sessions[session_id]['status'] = 'connected'
+        join_room(session_id)
+        print(f"📱 Phone joined session: {session_id}")
+        # Thông báo cho laptop
+        emit('session_joined', {'status': 'success', 'session_id': session_id})
+        emit('phone_connected', {'message': 'Điện thoại đã kết nối'}, room=session_id)
+    else:
+        emit('session_joined', {'status': 'error', 'message': 'Session không tồn tại'})
+
+@socketio.on('leave_session')
+def handle_leave_session(data):
+    """Rời khỏi session"""
+    session_id = data.get('session_id', '').upper()
+    if session_id in active_sessions:
+        leave_room(session_id)
+        print(f"📱 Client left session: {session_id}")
 
 # ==================== QUẢN LÝ THƯ VIỆN MẪU ====================
 
@@ -345,51 +412,165 @@ def delete_sample(sample_id):
 @app.route('/api/analyze', methods=['POST'])
 def analyze():
     """Phân tích chất lượng màu sơn"""
-    data = request.json
+    session_id = None
+    try:
+        data = request.json
+        session_id = data.get('session_id', '').upper() if data.get('session_id') else None
+        
+        print("=" * 60)
+        print("📊 BẮT ĐẦU PHÂN TÍCH CHẤT LƯỢNG MÀU SƠN")
+        print("=" * 60)
+        
+        if session_id:
+            print(f"📱 Session ID: {session_id}")
+            if session_id in active_sessions:
+                socketio.emit('analysis_started', {
+                    'message': 'Đang phân tích màu sắc...',
+                    'timestamp': datetime.now().isoformat()
+                }, room=session_id)
+        
+        # Lấy ảnh reference
+        if 'reference_sample_id' in data:
+            print(f"📁 Sử dụng mẫu từ thư viện: {data['reference_sample_id']}")
+            reference_img = get_sample_from_library(data['reference_sample_id'])
+            if reference_img is None:
+                print("❌ Không tìm thấy mẫu trong thư viện!")
+                return jsonify({'error': 'Sample not found'}), 404
+        else:
+            print("📤 Sử dụng ảnh upload từ client")
+            try:
+                reference_img = base64_to_image(data['reference_image'])
+                print(f"   ✅ Ảnh reference: {reference_img.shape}")
+            except Exception as e:
+                print(f"   ❌ Lỗi decode ảnh reference: {str(e)}")
+                return jsonify({'error': f'Invalid reference image: {str(e)}'}), 400
+        
+        # Lấy thông số
+        threshold_excellent = data.get('threshold_excellent', 1.5)
+        threshold_acceptable = data.get('threshold_acceptable', 2.5)
+        
+        print(f"⚙️  Ngưỡng tuyệt vời: {threshold_excellent}")
+        print(f"⚙️  Ngưỡng chấp nhận: {threshold_acceptable}")
+        
+        # Xử lý nhiều ảnh test
+        test_images = data['test_images']
+        print(f"📷 Số lượng ảnh test: {len(test_images)}")
+        results = []
+        
+        for idx, test_data in enumerate(test_images):
+            try:
+                print(f"\n🔍 Xử lý ảnh {idx + 1}/{len(test_images)}: {test_data.get('filename', 'unknown')}")
+                
+                # Broadcast progress to session
+                if session_id and session_id in active_sessions:
+                    socketio.emit('analysis_progress', {
+                        'current': idx + 1,
+                        'total': len(test_images),
+                        'filename': test_data.get('filename', 'unknown'),
+                        'message': f'Đang xử lý ảnh {idx + 1}/{len(test_images)}...'
+                    }, room=session_id)
+                
+                test_img = base64_to_image(test_data['image'])
+                print(f"   ✅ Kích thước: {test_img.shape}")
+                
+                result = process_and_compare(
+                    reference_img, test_img,
+                    threshold_excellent=threshold_excellent,
+                    threshold_acceptable=threshold_acceptable
+                )
+                result['filename'] = test_data.get('filename', 'unknown')
+                results.append(result)
+                
+                print(f"   ✅ Delta E: {result['delta_e']:.2f} - {result['status']}")
+            except Exception as e:
+                print(f"   ❌ Lỗi xử lý ảnh {idx + 1}: {str(e)}")
+                traceback.print_exc()
+                
+                if session_id and session_id in active_sessions:
+                    socketio.emit('analysis_error', {
+                        'error': f'Lỗi xử lý ảnh {idx + 1}: {str(e)}'
+                    }, room=session_id)
+                
+                return jsonify({'error': f'Error processing image {idx + 1}: {str(e)}'}), 500
+        
+        # Tính thống kê
+        delta_e_values = [r['delta_e'] for r in results]
+        stats = {
+            'total': len(results),
+            'excellent': sum(1 for r in results if r['status'] == 'TUYỆT VỜI'),
+            'acceptable': sum(1 for r in results if r['status'] == 'CHẤP NHẬN ĐƯỢC'),
+            'poor': sum(1 for r in results if r['status'] == 'KHÔNG ĐẠT'),
+            'avg_delta_e': float(np.mean(delta_e_values)),
+            'min_delta_e': float(np.min(delta_e_values)),
+            'max_delta_e': float(np.max(delta_e_values))
+        }
+        
+        print("\n" + "=" * 60)
+        print("✅ PHÂN TÍCH HOÀN TẤT!")
+        print(f"   📊 Tổng: {stats['total']} | ✅ {stats['excellent']} | ⚠️ {stats['acceptable']} | ❌ {stats['poor']}")
+        print(f"   📈 Trung bình ΔE: {stats['avg_delta_e']:.2f}")
+        print("=" * 60 + "\n")
+        
+        response_data = {
+            'results': results,
+            'stats': stats
+        }
+        
+        # Broadcast kết quả đến session (laptop) - KÈM HÌNH ẢNH
+        if session_id and session_id in active_sessions:
+            print(f"📤 Broadcasting result to session: {session_id}")
+            
+            # Chuyển reference image sang base64
+            reference_img_base64 = image_to_base64(reference_img)
+            
+            # Chuyển test images sang base64
+            test_images_with_base64 = []
+            for test_data in test_images:
+                test_img = base64_to_image(test_data['image'])
+                test_images_with_base64.append({
+                    'filename': test_data.get('filename', 'unknown'),
+                    'image': image_to_base64(test_img)
+                })
+            
+            socketio.emit('new_result', {
+                'results': results,
+                'stats': stats,
+                'reference_image': reference_img_base64,  # Thêm ảnh reference
+                'test_images': test_images_with_base64,   # Thêm ảnh test
+                'timestamp': datetime.now().isoformat()
+            }, room=session_id)
+        
+        return jsonify(response_data)
     
-    # Lấy ảnh reference
-    if 'reference_sample_id' in data:
-        reference_img = get_sample_from_library(data['reference_sample_id'])
-        if reference_img is None:
-            return jsonify({'error': 'Sample not found'}), 404
-    else:
-        reference_img = base64_to_image(data['reference_image'])
-    
-    # Lấy thông số
-    threshold_excellent = data.get('threshold_excellent', 1.5)
-    threshold_acceptable = data.get('threshold_acceptable', 2.5)
-    
-    # Xử lý nhiều ảnh test
-    test_images = data['test_images']
-    results = []
-    
-    for test_data in test_images:
-        test_img = base64_to_image(test_data['image'])
-        result = process_and_compare(
-            reference_img, test_img,
-            threshold_excellent=threshold_excellent,
-            threshold_acceptable=threshold_acceptable
-        )
-        result['filename'] = test_data.get('filename', 'unknown')
-        results.append(result)
-    
-    # Tính thống kê
-    delta_e_values = [r['delta_e'] for r in results]
-    stats = {
-        'total': len(results),
-        'excellent': sum(1 for r in results if r['status'] == 'TUYỆT VỜI'),
-        'acceptable': sum(1 for r in results if r['status'] == 'CHẤP NHẬN ĐƯỢC'),
-        'poor': sum(1 for r in results if r['status'] == 'KHÔNG ĐẠT'),
-        'avg_delta_e': float(np.mean(delta_e_values)),
-        'min_delta_e': float(np.min(delta_e_values)),
-        'max_delta_e': float(np.max(delta_e_values))
-    }
-    
-    return jsonify({
-        'results': results,
-        'stats': stats
-    })
+    except KeyError as e:
+        print(f"❌ Missing required field: {str(e)}")
+        return jsonify({'error': f'Missing required field: {str(e)}'}), 400
+    except Exception as e:
+        print(f"❌ Unexpected error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 if __name__ == '__main__':
     init_sample_library()
-    app.run(debug=True, host='0.0.0.0', port=5002)
+    print("\n" + "=" * 63)
+    print("🚀 ═══════════════════════════════════════════════════════════")
+    print("🌟   Wood Paint Quality Checker - Backend Server")
+    print("🌟   Powered by Flask + SocketIO + Delta E 2000 Analysis")
+    print("═══════════════════════════════════════════════════════════")
+    print(f"� Backend API:     http://0.0.0.0:5001/api")
+    print(f"🔌 WebSocket:       ws://0.0.0.0:5001")
+    print(f"🌐 Network Access:  http://192.168.1.5:5001")
+    print("═══════════════════════════════════════════════════════════")
+    print("💡 Async Mode:      threading")
+    print("💡 CORS:            Enabled for all origins")
+    print("=" * 63 + "\n")
+    
+    socketio.run(
+        app, 
+        host='0.0.0.0', 
+        port=5001, 
+        debug=True, 
+        use_reloader=False,  # Tắt reloader để tránh conflict với threading
+        allow_unsafe_werkzeug=True
+    )

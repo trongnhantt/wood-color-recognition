@@ -15,6 +15,7 @@ frontend/.env
 frontend/.env.local
 
 # IDE
+.github/
 .vscode/
 .idea/
 *.swp
